@@ -23,4 +23,5 @@ target
 # xml directory
 xmldb
 
+.DS_Store
 **/.DS_Store
