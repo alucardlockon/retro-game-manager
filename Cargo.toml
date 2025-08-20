@@ -1,0 +1,21 @@
+[package]
+name = "retro_game_search"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.27"
+quick-xml = { version = "0.31", features = ["encoding"] }
+walkdir = "2.5"
+rayon = "1.10"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+fontdb = "0.15"
+dirs = "5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
