@@ -1,6 +1,4 @@
 
-git add .
- by Cargo
 # will have compiled files and executables
 debug
 target
@@ -24,3 +22,5 @@ target
 
 # xml directory
 xmldb
+
+.DS_Store
