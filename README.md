@@ -1,4 +1,4 @@
-# RetroGameSearch
+# retro-game-manager
 
 一个基于 Rust + egui 的桌面应用，用于从 `xmldb/` 文件夹读取大量游戏数据库 XML，并提供本地快速搜索与查看。
 
@@ -38,7 +38,7 @@ cargo clippy --all-targets --all-features -D warnings
 
 ## 目录结构
 ```
-RetroGameSearch/
+retro-game-manager/
   ├─ src/
   │   ├─ main.rs        # UI、搜索/筛选、详情窗口
   │   └─ xml.rs         # XML 解析与 <game> 源片段提取

@@ -1,5 +1,5 @@
 [package]
-name = "retro_game_search"
+name = "retro-game-manager"
 version = "0.1.0"
 edition = "2021"
 

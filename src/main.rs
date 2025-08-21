@@ -739,7 +739,7 @@ fn install_chinese_fonts(ctx: &egui::Context) {
 fn main() -> Result<()> {
 	let native_options = eframe::NativeOptions::default();
 	eframe::run_native(
-		"Retro Game Search",
+		"retro-game-manager",
 		native_options,
 		Box::new(|cc| {
 			Box::new(RetroGameSearchApp::new(cc).unwrap())
