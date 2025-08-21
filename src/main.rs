@@ -8,7 +8,185 @@ use walkdir::WalkDir;
 
 mod xml;
 use crate::xml::{parse_games_from_file, GameEntry};
-use crate::xml::extract_game_xml_by_index;
+use egui::Color32;
+
+// 关键词高亮辅助
+fn tokenize_query(q: &str) -> Vec<String> {
+	q.split_whitespace()
+		.filter(|s| !s.is_empty())
+		.map(|s| s.to_lowercase())
+		.collect()
+}
+
+fn build_highlight_job(text: &str, tokens: &[String], style: &egui::Style) -> egui::text::LayoutJob {
+	use egui::text::LayoutJob;
+	use egui::TextFormat;
+	use egui::TextStyle;
+	let mut job = LayoutJob::default();
+	let font_id = TextStyle::Heading.resolve(style);
+	let normal = TextFormat { font_id: font_id.clone(), color: style.visuals.text_color(), ..Default::default() };
+	let highlight = TextFormat { font_id, color: style.visuals.hyperlink_color, ..Default::default() };
+
+	if tokens.is_empty() {
+		job.append(text, 0.0, normal);
+		return job;
+	}
+
+	let lower = text.to_lowercase();
+	let mut ranges: Vec<(usize, usize)> = Vec::new();
+	for t in tokens {
+		let mut start = 0usize;
+		while !t.is_empty() && start < lower.len() {
+			if let Some(pos) = lower[start..].find(t) {
+				let s = start + pos;
+				let e = s + t.len();
+				ranges.push((s, e));
+				start = e;
+			} else { break; }
+		}
+	}
+	if ranges.is_empty() {
+		job.append(text, 0.0, normal);
+		return job;
+	}
+	// 合并重叠
+	ranges.sort_by_key(|r| r.0);
+	let mut merged: Vec<(usize, usize)> = Vec::new();
+	for (s, e) in ranges {
+		if let Some(last) = merged.last_mut() {
+			if s <= last.1 { last.1 = last.1.max(e); continue; }
+		}
+		merged.push((s, e));
+	}
+	// 输出
+	let bytes = text.as_bytes();
+	let mut cursor = 0usize;
+	for (s, e) in merged {
+		if cursor < s {
+			let seg = std::str::from_utf8(&bytes[cursor..s]).unwrap_or("");
+			job.append(seg, 0.0, normal.clone());
+		}
+		let seg = std::str::from_utf8(&bytes[s..e]).unwrap_or("");
+		job.append(seg, 0.0, highlight.clone());
+		cursor = e;
+	}
+	if cursor < text.len() {
+		let seg = std::str::from_utf8(&bytes[cursor..]).unwrap_or("");
+		job.append(seg, 0.0, normal);
+	}
+	job
+}
+
+// XML 语法高亮（简易）
+#[inline]
+fn is_space(b: u8) -> bool { b.is_ascii_whitespace() }
+
+#[inline]
+fn is_name_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b':' || b == b'_' || b == b'-' || b == b'.'
+}
+
+fn xml_highlight_job(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
+	use egui::text::LayoutJob;
+	use egui::TextFormat;
+	use egui::TextStyle;
+	let mut job = LayoutJob::default();
+	let font_id = TextStyle::Monospace.resolve(ui.style());
+	let fg = ui.style().visuals.text_color();
+	let normal = TextFormat { font_id: font_id.clone(), color: fg, ..Default::default() };
+	let tag_color = ui.style().visuals.hyperlink_color;
+	let attr_color = ui.style().visuals.strong_text_color();
+	let val_color = Color32::from_rgb(156, 220, 254);
+	let comment_color = Color32::from_gray(120);
+
+	let bytes = text.as_bytes();
+	let mut i = 0usize;
+	while i < bytes.len() {
+		// 注释 <!-- -->
+		if bytes[i..].starts_with(b"<!--") {
+			if let Some(end) = find_bytes(&bytes, i + 4, b"-->") {
+				let seg = std::str::from_utf8(&bytes[i..end+3]).unwrap_or("");
+				job.append(seg, 0.0, TextFormat { font_id: font_id.clone(), color: comment_color, ..Default::default() });
+				i = end + 3;
+				continue;
+			} else {
+				let seg = std::str::from_utf8(&bytes[i..]).unwrap_or("");
+				job.append(seg, 0.0, TextFormat { font_id: font_id.clone(), color: comment_color, ..Default::default() });
+				break;
+			}
+		}
+		// 标签 <...>
+		if bytes[i] == b'<' {
+			// 输出 '<'
+			job.append("<", 0.0, TextFormat { font_id: font_id.clone(), color: tag_color, ..Default::default() });
+			i += 1;
+			// 可能有 '/'
+			if i < bytes.len() && bytes[i] == b'/' {
+				job.append("/", 0.0, TextFormat { font_id: font_id.clone(), color: tag_color, ..Default::default() });
+				i += 1;
+			}
+			// 读取标签名
+			let start = i;
+			while i < bytes.len() && is_name_char(bytes[i]) { i += 1; }
+			if i > start {
+				let seg = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+				job.append(seg, 0.0, TextFormat { font_id: font_id.clone(), color: tag_color, ..Default::default() });
+			}
+			// 属性
+			loop {
+				// 跳过空白
+				while i < bytes.len() && is_space(bytes[i]) { i += 1; }
+				if i >= bytes.len() { break; }
+				if bytes[i] == b'>' { job.append(">", 0.0, TextFormat { font_id: font_id.clone(), color: tag_color, ..Default::default() }); i += 1; break; }
+				if bytes[i] == b'/' {
+					job.append("/", 0.0, TextFormat { font_id: font_id.clone(), color: tag_color, ..Default::default() });
+					if i + 1 < bytes.len() && bytes[i+1] == b'>' {
+						job.append(">", 0.0, TextFormat { font_id: font_id.clone(), color: tag_color, ..Default::default() });
+						i += 2; break;
+					} else { i += 1; continue; }
+				}
+				// 属性名
+				let an_start = i;
+				while i < bytes.len() && is_name_char(bytes[i]) { i += 1; }
+				if i > an_start {
+					let seg = std::str::from_utf8(&bytes[an_start..i]).unwrap_or("");
+					job.append(seg, 0.0, TextFormat { font_id: font_id.clone(), color: attr_color, ..Default::default() });
+				}
+				// 跳过空白
+				while i < bytes.len() && is_space(bytes[i]) { i += 1; }
+				if i < bytes.len() && bytes[i] == b'=' { job.append("=", 0.0, normal.clone()); i += 1; }
+				while i < bytes.len() && is_space(bytes[i]) { i += 1; }
+				// 值（引号）
+				if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+					let quote = bytes[i];
+					let vstart = i;
+					i += 1;
+					while i < bytes.len() && bytes[i] != quote { i += 1; }
+					let vend = if i < bytes.len() { i + 1 } else { i };
+					let seg = std::str::from_utf8(&bytes[vstart..vend]).unwrap_or("");
+					job.append(seg, 0.0, TextFormat { font_id: font_id.clone(), color: val_color, ..Default::default() });
+					if i < bytes.len() { i += 1; }
+				}
+			}
+			continue;
+		}
+		// 普通文本：直到下一个 '<'
+		let start = i;
+		while i < bytes.len() && bytes[i] != b'<' { i += 1; }
+		let seg = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+		job.append(seg, 0.0, normal.clone());
+	}
+	job
+}
+
+fn find_bytes(hay: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+	let mut i = start;
+	while i + needle.len() <= hay.len() {
+		if &hay[i..i+needle.len()] == needle { return Some(i); }
+		i += 1;
+	}
+	None
+}
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize, Clone)]
 struct RecentFilters {
@@ -58,7 +236,6 @@ struct RetroGameSearchApp {
 	recent_regions: Vec<String>,
 	recent_languages: Vec<String>,
 	recent_store: RecentFilters,
-	xmldb_dir: PathBuf,
     // 详情页状态
     selected_index: Option<usize>,
     show_detail: bool,
@@ -67,9 +244,13 @@ struct RetroGameSearchApp {
 }
 
 impl RetroGameSearchApp {
-	fn new(xmldb_dir: PathBuf) -> Result<Self> {
+	fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
+		let xmldb_dir = std::env::current_dir()
+			.context("无法获取当前目录")?
+			.join("xmldb");
 		let (index, platforms, regions, languages, status) = load_index(&xmldb_dir)?;
 		let persisted = RecentFilters::load();
+		install_chinese_fonts(&cc.egui_ctx);
 		Ok(Self {
 			query: String::new(),
 			platform_filter: String::new(),
@@ -84,7 +265,6 @@ impl RetroGameSearchApp {
 			recent_languages: persisted.languages.clone(),
 			recent_store: persisted,
 			index,
-			xmldb_dir,
             selected_index: None,
             show_detail: false,
             detail_xml_cache: None,
@@ -284,15 +464,23 @@ impl App for RetroGameSearchApp {
                                             self.detail_xml_cache = Some(xml);
                                         }
                                     }
-                                    let mut code_txt = self.detail_xml_cache.clone().unwrap_or_else(|| "<game/>".to_string());
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut code_txt)
-                                                .code_editor()
-                                                .interactive(false)
-                                                .desired_width(ui.available_width())
-                                        );
-                                    });
+                                    let code_txt = self.detail_xml_cache.clone().unwrap_or_else(|| "<game/>".to_string());
+                                    egui::ScrollArea::both() // 启用水平和垂直滚动
+                                        .auto_shrink([false, true])
+                                        .max_height(ui.available_height() - 10.0)
+                                        .show(ui, |ui| {
+                                            let mut layouter = |_ui: &egui::Ui, text: &str, _wrap_width: f32| {
+                                                let job = xml_highlight_job(_ui, text);
+                                                _ui.fonts(|f| f.layout_job(job))
+                                            };
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut code_txt.clone())
+                                                    .code_editor()
+                                                    .interactive(false)
+                                                    .layouter(&mut layouter)
+                                                    .desired_width(ui.available_width())
+                                            );
+                                        });
                                 }
                             }
                         });
@@ -324,7 +512,9 @@ impl App for RetroGameSearchApp {
 					let card_width = (width - 12.0).max(0.0);
 					let inner = egui::Frame::group(ui.style()).show(ui, |ui| {
 						ui.set_width(card_width);
-						ui.heading(&g.name);
+						let tokens = tokenize_query(&self.query);
+						let job = build_highlight_job(&g.name, &tokens, ui.style());
+						ui.label(job);
 						ui.label(format!(
 							"平台: {} | 区域: {} | 语言: {}",
 							g.platform,
@@ -443,9 +633,11 @@ fn filter_results<'a>(
 						.map(|n| n.to_lowercase().contains(&q))
 						.unwrap_or(false);
 			}
+			// 平台：严格匹配（不区分大小写）
 			if !p.is_empty() {
-				ok &= g.platform.to_lowercase().contains(&p);
+				ok &= g.platform.to_lowercase() == p;
 			}
+			// 区域：仍然模糊匹配
 			if !r.is_empty() {
 				ok &= g
 					.region
@@ -453,11 +645,12 @@ fn filter_results<'a>(
 					.map(|v| v.to_lowercase().contains(&r))
 					.unwrap_or(false);
 			}
+			// 语言：严格匹配（不区分大小写）；支持逗号分隔多值
 			if !l.is_empty() {
 				ok &= g
 					.languages
 					.as_deref()
-					.map(|v| v.to_lowercase().contains(&l))
+					.map(|v| v.split(',').map(|s| s.trim().to_lowercase()).any(|tok| tok == l))
 					.unwrap_or(false);
 			}
 			ok
@@ -544,19 +737,12 @@ fn install_chinese_fonts(ctx: &egui::Context) {
 }
 
 fn main() -> Result<()> {
-	let xmldb_dir = std::env::current_dir()
-		.context("无法获取当前目录")?
-		.join("xmldb");
-
-	let app = RetroGameSearchApp::new(xmldb_dir)?;
-
 	let native_options = eframe::NativeOptions::default();
 	eframe::run_native(
 		"Retro Game Search",
 		native_options,
-		Box::new(move |cc| {
-			install_chinese_fonts(&cc.egui_ctx);
-			Box::new(app)
+		Box::new(|cc| {
+			Box::new(RetroGameSearchApp::new(cc).unwrap())
 		}),
 	)
 	.map_err(|e| anyhow!(e.to_string()))?;
