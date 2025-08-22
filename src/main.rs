@@ -199,6 +199,7 @@ struct RecentFilters {
 	selected_platforms: Vec<String>,  // 添加记住选择的平台
 	selected_region: Option<String>,   // 添加记住选择的区域
 	selected_language: Option<String>, // 添加记住选择的语言
+	default_vendors: String,           // 添加默认厂商列表
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,11 +229,13 @@ impl RecentFilters {
 	}
 }
 
-struct RetroGameSearchApp {
+struct RetroGameManagerApp {
 	query: String,
 	platform_filters: Vec<String>,  // 支持多选
 	platform_search: String,        // 平台搜索文本
 	show_platform_selector: bool,   // 控制平台选择器显示
+	show_preferences: bool,         // 控制首选项窗口显示
+	show_about: bool,               // 控制关于窗口显示
 	region_filter: String,
 	language_filter: String,
 	status: String,
@@ -244,6 +247,8 @@ struct RetroGameSearchApp {
 	recent_regions: Vec<String>,
 	recent_languages: Vec<String>,
 	recent_store: RecentFilters,
+    // 配置选项
+    default_vendors: String,          // 默认厂商列表
     // 详情页状态
     selected_index: Option<usize>,
     show_detail: bool,
@@ -251,9 +256,11 @@ struct RetroGameSearchApp {
     detail_tab: DetailTab,
     // 图片加载器
     image_loader: Arc<ImageLoader>,
+    // 初始化标志
+    initialized: bool,
 }
 
-impl RetroGameSearchApp {
+impl RetroGameManagerApp {
 	fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
 		let xmldb_dir = std::env::current_dir()
 			.context("无法获取当前目录")?
@@ -264,11 +271,14 @@ impl RetroGameSearchApp {
 		let image_loader = Arc::new(ImageLoader::new());
 		Ok(Self {
 			query: String::new(),
-			platform_filters: persisted.selected_platforms.clone(),  // 从保存的数据中恢复
+			platform_filters: persisted.selected_platforms.clone(),  // 从保存的数据中恢复已选择的平台
 			platform_search: String::new(),  // 初始化平台搜索文本
 			show_platform_selector: false,   // 初始化平台选择器显示状态
+			show_preferences: false,         // 初始化首选项窗口显示状态
+			show_about: false,               // 初始化关于窗口显示状态
 			region_filter: persisted.selected_region.clone().unwrap_or_default(),  // 从保存的数据中恢复区域选择
 			language_filter: persisted.selected_language.clone().unwrap_or_default(),  // 从保存的数据中恢复语言选择
+			default_vendors: persisted.default_vendors.clone(),  // 从保存的数据中恢复默认厂商列表
 			status,
 			platforms,
 			available_regions: regions,
@@ -283,6 +293,7 @@ impl RetroGameSearchApp {
             detail_xml_cache: None,
             detail_tab: DetailTab::Info,
             image_loader,
+            initialized: false,
 		})
 	}
 
@@ -301,18 +312,47 @@ impl RetroGameSearchApp {
 		} else { 
 			Some(self.language_filter.clone()) 
 		};  // 保存当前选择的语言
+		
+		// 保存常用平台配置
+		self.recent_store.default_vendors = self.default_vendors.clone();
+		
 		self.recent_store.save();
 	}
 }
 
-impl App for RetroGameSearchApp {
+impl App for RetroGameManagerApp {
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-		egui::TopBottomPanel::top("top").show(ctx, |ui| {
+		// 初始化逻辑
+		if !self.initialized {
+			// 注意：我们不再自动选中常用平台
+			// 平台选择应该完全从保存的数据中恢复
+			// self.platform_filters 已经在 new() 函数中从 persisted.selected_platforms 恢复了
+			self.initialized = true;
+		}
+		
+		// 在主窗口内显示菜单栏，按照Mac标准排列
+		egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
+			egui::menu::bar(ui, |ui| {
+				// Mac标准菜单排列：首选项、关于
+				if ui.button("首选项").clicked() {
+					self.show_preferences = true;
+				}
+				if ui.button("关于").clicked() {
+					self.show_about = true;
+				}
+			});
+		});
+		
+		// 主要搜索界面
+		egui::TopBottomPanel::top("search").show(ctx, |ui| {
 			ui.horizontal_wrapped(|ui| {
 				ui.label("搜索");
 				let _changed = ui.text_edit_singleline(&mut self.query).changed();
 				ui.separator();
 
+				// 添加键盘快捷键提示
+				// Mac用户可以使用 Cmd + , 打开首选项
+				
 				// 平台：标签在左 + 多选
 				ui.horizontal(|ui| {
 					ui.label("平台");
@@ -365,6 +405,57 @@ impl App for RetroGameSearchApp {
 								egui::ScrollArea::vertical()
 									.max_height(300.0)
 									.show(ui, |ui| {
+										// 添加常用平台分组
+										if !self.default_vendors.is_empty() {
+											ui.collapsing("常用平台", |ui| {
+												// 解析自定义厂商列表
+												let vendors: Vec<String> = self.default_vendors.split(',')
+													.map(|s| s.trim().to_string())
+													.filter(|s| !s.is_empty())
+													.collect();
+												
+												// 查找匹配的常用平台
+												let mut common_platforms = Vec::new();
+												for platform in &self.platforms {
+													for vendor in &vendors {
+														if platform.starts_with(vendor) {
+															common_platforms.push(platform.clone());
+															break;
+														}
+													}
+												}
+												
+												// 为每个常用平台添加checkbox
+												if !common_platforms.is_empty() {
+													let mut updates = Vec::new();
+													for platform in &common_platforms {
+														let mut selected = self.platform_filters.contains(platform);
+														if ui.checkbox(&mut selected, platform).clicked() {
+															updates.push((platform.clone(), selected));
+														}
+													}
+													
+													// 应用更新
+													for (platform, selected) in updates {
+														if selected {
+															if !self.platform_filters.contains(&platform) {
+																self.platform_filters.push(platform.clone());
+																add_recent(&mut self.recent_platforms, &platform);
+																self.persist_recents();
+															}
+														} else {
+															self.platform_filters.retain(|p| p != &platform);
+															self.persist_recents();
+														}
+													}
+												} else {
+													ui.label("未找到匹配的常用平台");
+												}
+											});
+											
+											ui.separator();
+										}
+										
 										// 为每个平台添加checkbox，但限制显示数量
 										let mut displayed_count = 0;
 										let max_display = 50; // 限制最多显示50个平台
@@ -698,6 +789,61 @@ impl App for RetroGameSearchApp {
 				}
 			});
 		});
+		
+		// 显示首选项配置窗口
+		if self.show_preferences {
+			let mut open = true;
+			egui::Window::new("首选项")
+				.open(&mut open)
+				.resizable(false)
+				.default_size(egui::vec2(400.0, 250.0))
+				.show(ctx, |ui| {
+					ui.vertical(|ui| {
+						ui.label("常用平台厂商 (逗号分隔):");
+						ui.text_edit_singleline(&mut self.default_vendors);
+						
+						ui.separator();
+						
+						if ui.button("保存").clicked() {
+							// 保存配置到recent_store
+							self.persist_recents();
+						}
+						
+						if ui.button("取消").clicked() {
+							self.show_preferences = false;
+						}
+					});
+				});
+			
+			if !open {
+				self.show_preferences = false;
+			}
+		}
+		
+		// 显示关于窗口
+		if self.show_about {
+			let mut open = true;
+			egui::Window::new("关于 retro-game-manager")
+				.open(&mut open)
+				.resizable(false)
+				.default_size(egui::vec2(300.0, 200.0))
+				.show(ctx, |ui| {
+					ui.vertical_centered(|ui| {
+						ui.heading("RetroGameManager");
+						ui.label("版本 1.0.0");
+						ui.separator();
+						ui.label("一个用于管理和搜索复古游戏的工具");
+						ui.label("");
+						ui.label("© 2025 alucardlockon. 保留所有权利。");
+						ui.label("");
+						ui.hyperlink_to("GitHub 仓库", "https://github.com/yourusername/retro-game-manager");
+					});
+				});
+			
+			if !open {
+				self.show_about = false;
+			}
+		}
 	}
 }
 
@@ -892,16 +1038,26 @@ fn install_chinese_fonts(ctx: &egui::Context) {
 }
 
 fn main() -> Result<(), Error> {
+	let viewport = egui::ViewportBuilder::default()
+		.with_inner_size([800.0, 600.0])  // 修改默认窗口大小
+		.with_min_inner_size([600.0, 400.0])
+		.with_title("retro-game-manager");
+	
+	// 尝试添加原生菜单项（如果egui支持）
+	// 注意：这取决于egui版本，某些版本可能支持原生菜单
+	
 	let native_options = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_inner_size([800.0, 600.0])  // 修改默认窗口大小
-			.with_min_inner_size([600.0, 400.0]),
+		viewport,
 		..Default::default()
 	};
 
 	eframe::run_native(
 		"retro-game-manager",  // 修改窗口标题为英文
 		native_options,
-		Box::new(|cc| Box::new(RetroGameSearchApp::new(cc).unwrap())),
+		Box::new(|cc| {
+			// 尝试设置原生菜单（如果API可用）
+			// 这需要检查egui版本是否支持此功能
+			Box::new(RetroGameManagerApp::new(cc).unwrap())
+		}),
 	)
 }
