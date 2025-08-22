@@ -704,13 +704,31 @@ impl App for RetroGameManagerApp {
                                             }
                                         });
                                     }
-																		if ui.button("重命名文件").clicked() {
-                                        // 使用rfd打开文件选择对话框
-                                        if let Some(_file_path) = FileDialog::new().pick_file() {
-                                            // 存储待重命名的文件和游戏
-                                            self.pending_file_rename = Some((_file_path, (*g).clone()));
+                                    
+                                    // 添加重命名文件按钮和用归档名称重命名按钮
+                                    ui.horizontal(|ui| {
+                                        if ui.button("重命名文件").clicked() {
+                                            // 使用rfd打开文件选择对话框
+                                            if let Some(_file_path) = FileDialog::new().pick_file() {
+                                                // 存储待重命名的文件和游戏
+                                                self.pending_file_rename = Some((_file_path, (*g).clone()));
+                                            }
                                         }
-                                    }
+                                        
+                                        // 添加一个根据归档名称进行重命名的按钮
+                                        if let Some(archive_name) = &g.archive_name {
+                                            if ui.button("用归档名称重命名").clicked() {
+                                                // 使用rfd打开文件选择对话框
+                                                if let Some(_file_path) = FileDialog::new().pick_file() {
+                                                    // 创建一个带有归档名称的游戏条目副本，用于重命名
+                                                    let mut game_with_archive_name = g.clone();
+                                                    game_with_archive_name.name = archive_name.clone();
+                                                    // 存储待重命名的文件和带有归档名称的游戏条目
+                                                    self.pending_file_rename = Some((_file_path, game_with_archive_name));
+                                                }
+                                            }
+                                        }
+                                    });
                                     // 使用更小的间距
                                     ui.add_space(5.0);
                                     
