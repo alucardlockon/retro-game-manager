@@ -10,6 +10,7 @@ use rfd::FileDialog;
 
 mod xml;
 mod image_loader;
+mod baidu_fallback;
 use crate::xml::{parse_games_from_file, GameEntry};
 use crate::image_loader::{ImageLoader, ImageLoadResult};
 use egui::Color32;
@@ -204,7 +205,7 @@ struct RecentFilters {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetailTab { Info, Xml }
+enum DetailTab { Info, Xml, WebSearch }
 
 impl RecentFilters {
 	fn load() -> Self {
@@ -232,12 +233,12 @@ impl RecentFilters {
 
 struct RetroGameManagerApp {
 	query: String,
-	platform_filters: Vec<String>,  // 支持多选
-	platform_search: String,        // 平台搜索文本
-	show_platform_selector: bool,   // 控制平台选择器显示
-	show_preferences: bool,         // 控制首选项窗口显示
-	show_about: bool,               // 控制关于窗口显示
-	pending_file_rename: Option<(std::path::PathBuf, GameEntry)>, // 待重命名的文件和游戏
+	platform_filters: Vec<String>,
+	platform_search: String,
+	show_platform_selector: bool,
+	show_preferences: bool,
+	show_about: bool,
+	pending_file_rename: Option<(std::path::PathBuf, GameEntry)>,
 	region_filter: String,
 	language_filter: String,
 	status: String,
@@ -250,7 +251,7 @@ struct RetroGameManagerApp {
 	recent_languages: Vec<String>,
 	recent_store: RecentFilters,
     // 配置选项
-    default_vendors: String,          // 默认厂商列表
+    default_vendors: String,
     // 详情页状态
     selected_index: Option<usize>,
     show_detail: bool,
@@ -273,15 +274,15 @@ impl RetroGameManagerApp {
 		let image_loader = Arc::new(ImageLoader::new());
 		Ok(Self {
 			query: String::new(),
-			platform_filters: persisted.selected_platforms.clone(),  // 从保存的数据中恢复已选择的平台
-			platform_search: String::new(),  // 初始化平台搜索文本
-			show_platform_selector: false,   // 初始化平台选择器显示状态
-			show_preferences: false,         // 初始化首选项窗口显示状态
-			show_about: false,               // 初始化关于窗口显示状态
-			pending_file_rename: None,       // 初始化待重命名的文件和游戏
-			region_filter: persisted.selected_region.clone().unwrap_or_default(),  // 从保存的数据中恢复区域选择
-			language_filter: persisted.selected_language.clone().unwrap_or_default(),  // 从保存的数据中恢复语言选择
-			default_vendors: persisted.default_vendors.clone(),  // 从保存的数据中恢复默认厂商列表
+			platform_filters: persisted.selected_platforms.clone(),
+			platform_search: String::new(),
+			show_platform_selector: false,
+			show_preferences: false,
+			show_about: false,
+			pending_file_rename: None,
+			region_filter: persisted.selected_region.clone().unwrap_or_default(),
+			language_filter: persisted.selected_language.clone().unwrap_or_default(),
+			default_vendors: persisted.default_vendors.clone(),
 			status,
 			platforms,
 			available_regions: regions,
@@ -291,12 +292,12 @@ impl RetroGameManagerApp {
 			recent_languages: persisted.languages.clone(),
 			recent_store: persisted,
 			index,
-            selected_index: None,
-            show_detail: false,
-            detail_xml_cache: None,
-            detail_tab: DetailTab::Info,
-            image_loader,
-            initialized: false,
+			selected_index: None,
+			show_detail: false,
+			detail_xml_cache: None,
+			detail_tab: DetailTab::Info,
+			image_loader, // 初始化图片加载器
+			initialized: false,
 		})
 	}
 
@@ -637,75 +638,81 @@ impl App for RetroGameManagerApp {
                             ui.horizontal(|ui| {
                                 let info_clicked = ui.selectable_label(self.detail_tab == DetailTab::Info, "基本信息").clicked();
                                 let xml_clicked = ui.selectable_label(self.detail_tab == DetailTab::Xml, "XML 源码").clicked();
+                                let web_search_clicked = ui.selectable_label(self.detail_tab == DetailTab::WebSearch, "网页搜索").clicked();
                                 if info_clicked { self.detail_tab = DetailTab::Info; }
                                 if xml_clicked { self.detail_tab = DetailTab::Xml; }
+                                if web_search_clicked { self.detail_tab = DetailTab::WebSearch; }
                             });
                             ui.separator();
                             match self.detail_tab {
                                 DetailTab::Info => {
-                                    // 使用异步图片加载器加载三张图片
-                                    let (boxart_result, title_result, snap_result) = self.image_loader.load_game_images_async(
+                                    // 显示游戏详情
+                                    ui.heading(&g.name);
+                                    
+                                    // 加载并显示图片
+                                    let (boxart, title, snap) = self.image_loader.load_game_images_async(
                                         ctx,
                                         g.platform.clone(),
-                                        g.name.clone(),
+                                        g.name.clone(), // 使用游戏名加载图片
                                     );
                                     
-                                    // 只有当至少有一张图片存在时才显示
-                                    let has_images = matches!(boxart_result, ImageLoadResult::Loaded(_)) || 
-                                                    matches!(title_result, ImageLoadResult::Loaded(_)) || 
-                                                    matches!(snap_result, ImageLoadResult::Loaded(_));
+                                    // 只有当至少有一张图片加载成功时，才显示图片行
+                                    let has_loaded_image = matches!(boxart, ImageLoadResult::Loaded(_)) || 
+                                                           matches!(title, ImageLoadResult::Loaded(_)) || 
+                                                           matches!(snap, ImageLoadResult::Loaded(_));
                                     
-                                    if has_images {
+                                    if has_loaded_image {
+                                        // 显示图片，不再均分，而是保持原始宽高比并限制最大尺寸
                                         ui.horizontal(|ui| {
-                                            // 计算每张图片的大小，使三张图片平均分布
-                                            let available_width = ui.available_width();
-                                            let max_size = egui::Vec2::new((available_width / 3.0) - 10.0, 200.0);
+                                            let max_size = egui::Vec2::new(150.0, 150.0); // 限制图片的最大宽度和高度为150
                                             
-                                            // 显示Boxart图片
-                                            if let ImageLoadResult::Loaded(texture_handle) = &boxart_result {
-                                                ui.image((texture_handle.id(), max_size));
-                                            } else if matches!(boxart_result, ImageLoadResult::Loading) {
-                                                ui.allocate_ui(max_size, |ui| {
-                                                    ui.centered_and_justified(|ui| {
-                                                        ui.label("加载中...");
-                                                    });
+                                            // 创建一个没有内边距的Frame来包裹图片
+                                            let frame = egui::Frame::none();
+                                            
+                                            if let ImageLoadResult::Loaded(texture) = &boxart {
+                                                let texture_size = texture.size();
+                                                let scale = (max_size.x / texture_size[0] as f32).min(max_size.y / texture_size[1] as f32).min(1.0);
+                                                let image_size = egui::Vec2::new(
+                                                    texture_size[0] as f32 * scale,
+                                                    texture_size[1] as f32 * scale,
+                                                );
+                                                frame.show(ui, |ui| {
+                                                    ui.image((texture.id(), image_size));
                                                 });
                                             }
-                                            
-                                            // 显示Title图片
-                                            if let ImageLoadResult::Loaded(texture_handle) = &title_result {
-                                                ui.image((texture_handle.id(), max_size));
-                                            } else if matches!(title_result, ImageLoadResult::Loading) {
-                                                ui.allocate_ui(max_size, |ui| {
-                                                    ui.centered_and_justified(|ui| {
-                                                        ui.label("加载中...");
-                                                    });
+                                            if let ImageLoadResult::Loaded(texture) = &title {
+                                                let texture_size = texture.size();
+                                                let scale = (max_size.x / texture_size[0] as f32).min(max_size.y / texture_size[1] as f32).min(1.0);
+                                                let image_size = egui::Vec2::new(
+                                                    texture_size[0] as f32 * scale,
+                                                    texture_size[1] as f32 * scale,
+                                                );
+                                                frame.show(ui, |ui| {
+                                                    ui.image((texture.id(), image_size));
                                                 });
                                             }
-                                            
-                                            // 显示Snap图片
-                                            if let ImageLoadResult::Loaded(texture_handle) = &snap_result {
-                                                ui.image((texture_handle.id(), max_size));
-                                            } else if matches!(snap_result, ImageLoadResult::Loading) {
-                                                ui.allocate_ui(max_size, |ui| {
-                                                    ui.centered_and_justified(|ui| {
-                                                        ui.label("加载中...");
-                                                    });
+                                            if let ImageLoadResult::Loaded(texture) = &snap {
+                                                let texture_size = texture.size();
+                                                let scale = (max_size.x / texture_size[0] as f32).min(max_size.y / texture_size[1] as f32).min(1.0);
+                                                let image_size = egui::Vec2::new(
+                                                    texture_size[0] as f32 * scale,
+                                                    texture_size[1] as f32 * scale,
+                                                );
+                                                frame.show(ui, |ui| {
+                                                    ui.image((texture.id(), image_size));
                                                 });
                                             }
                                         });
-                                        ui.separator();
                                     }
-                                    
-                                    // 添加重命名按钮
-                                    if ui.button("重命名文件").clicked() {
+																		if ui.button("重命名文件").clicked() {
                                         // 使用rfd打开文件选择对话框
                                         if let Some(_file_path) = FileDialog::new().pick_file() {
                                             // 存储待重命名的文件和游戏
                                             self.pending_file_rename = Some((_file_path, (*g).clone()));
                                         }
                                     }
-                                    ui.separator();
+                                    // 使用更小的间距
+                                    ui.add_space(5.0);
                                     
                                     ui.label(format!("平台: {}", g.platform));
                                     ui.label(format!("区域: {}", g.region.as_deref().unwrap_or("未知")));
@@ -737,6 +744,48 @@ impl App for RetroGameManagerApp {
                                                     .desired_width(ui.available_width())
                                             );
                                         });
+                                }
+                                DetailTab::WebSearch => {
+                                    // 确定用于搜索的名称：优先使用归档名，如果没有则使用游戏名
+                                    let search_name = g.archive_name.as_ref().unwrap_or(&g.name);
+                                    
+                                    ui.label("在浏览器中打开以下搜索链接:");
+                                    ui.separator();
+                                    
+                                    // 百度搜索链接
+                                    let baidu_url = format!("https://www.baidu.com/s?wd={}", search_name);
+                                    if ui.button("🔍 百度搜索").clicked() {
+                                        // 尝试在浏览器中打开链接
+                                        if let Err(e) = webbrowser::open(&baidu_url) {
+                                            eprintln!("无法在浏览器中打开链接: {}", e);
+                                        }
+                                    }
+                                    ui.hyperlink_to("在浏览器中打开", &baidu_url);
+                                    ui.label(&baidu_url);
+                                    ui.separator();
+                                    
+                                    // Wikipedia搜索链接
+                                    let wikipedia_url = format!("https://en.wikipedia.org/w/index.php?search={}&title=Special%3ASearch&ns0=1", search_name.replace(" ", "_"));
+                                    if ui.button("🔍 Wikipedia搜索").clicked() {
+                                        // 尝试在浏览器中打开链接
+                                        if let Err(e) = webbrowser::open(&wikipedia_url) {
+                                            eprintln!("无法在浏览器中打开链接: {}", e);
+                                        }
+                                    }
+                                    ui.hyperlink_to("在浏览器中打开", &wikipedia_url);
+                                    ui.label(&wikipedia_url);
+                                    ui.separator();
+                                    
+                                    // Google搜索链接
+                                    let google_url = format!("https://www.google.com/search?q={}", search_name);
+                                    if ui.button("🔍 Google搜索").clicked() {
+                                        // 尝试在浏览器中打开链接
+                                        if let Err(e) = webbrowser::open(&google_url) {
+                                            eprintln!("无法在浏览器中打开链接: {}", e);
+                                        }
+                                    }
+                                    ui.hyperlink_to("在浏览器中打开", &google_url);
+                                    ui.label(&google_url);
                                 }
                             }
                         });

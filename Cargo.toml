@@ -18,6 +18,9 @@ fontdb = "0.15"
 dirs = "5"
 reqwest = { version = "0.11", features = ["blocking"] }
 rfd = "0.14"
+scraper = "0.24.0"
+urlencoding = "2.1.3"
+webbrowser = "1.0.5"
 
 [profile.release]
 opt-level = 3

@@ -97,7 +97,7 @@ impl ImageLoader {
                 "https://raw.githubusercontent.com/libretro-thumbnails/{}/master/{}/{}.png",
                 thumb_platform,
                 image_type,
-                game_name.replace("/", "_").replace("\\\\", "_").replace(":", "_")
+                game_name.replace("/", "_").replace("\\", "_").replace(":", "_")
             );
             Some(url)
         } else {
