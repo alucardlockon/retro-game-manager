@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use eframe::{egui, App, Error};
 use rayon::prelude::*;
 use walkdir::WalkDir;
+use rfd::FileDialog;
 
 mod xml;
 mod image_loader;
@@ -236,6 +237,7 @@ struct RetroGameManagerApp {
 	show_platform_selector: bool,   // 控制平台选择器显示
 	show_preferences: bool,         // 控制首选项窗口显示
 	show_about: bool,               // 控制关于窗口显示
+	pending_file_rename: Option<(std::path::PathBuf, GameEntry)>, // 待重命名的文件和游戏
 	region_filter: String,
 	language_filter: String,
 	status: String,
@@ -276,6 +278,7 @@ impl RetroGameManagerApp {
 			show_platform_selector: false,   // 初始化平台选择器显示状态
 			show_preferences: false,         // 初始化首选项窗口显示状态
 			show_about: false,               // 初始化关于窗口显示状态
+			pending_file_rename: None,       // 初始化待重命名的文件和游戏
 			region_filter: persisted.selected_region.clone().unwrap_or_default(),  // 从保存的数据中恢复区域选择
 			language_filter: persisted.selected_language.clone().unwrap_or_default(),  // 从保存的数据中恢复语言选择
 			default_vendors: persisted.default_vendors.clone(),  // 从保存的数据中恢复默认厂商列表
@@ -694,6 +697,16 @@ impl App for RetroGameManagerApp {
                                         ui.separator();
                                     }
                                     
+                                    // 添加重命名按钮
+                                    if ui.button("重命名文件").clicked() {
+                                        // 使用rfd打开文件选择对话框
+                                        if let Some(_file_path) = FileDialog::new().pick_file() {
+                                            // 存储待重命名的文件和游戏
+                                            self.pending_file_rename = Some((_file_path, (*g).clone()));
+                                        }
+                                    }
+                                    ui.separator();
+                                    
                                     ui.label(format!("平台: {}", g.platform));
                                     ui.label(format!("区域: {}", g.region.as_deref().unwrap_or("未知")));
                                     ui.label(format!("语言: {}", g.languages.as_deref().unwrap_or("未知")));
@@ -844,6 +857,14 @@ impl App for RetroGameManagerApp {
 				self.show_about = false;
 			}
 		}
+		
+		// 处理文件重命名
+		if let Some((file_path, game)) = self.pending_file_rename.take() {
+			if let Err(e) = self.rename_file_to_game_name(&file_path, &game) {
+				// 显示错误消息（在实际应用中可能需要更好的错误处理）
+				eprintln!("重命名文件失败: {}", e);
+			}
+		}
 	}
 }
 
@@ -956,6 +977,40 @@ fn filter_results<'a>(
 			ok
 		})
 		.take(1000) // 限制结果数量以避免卡顿
+		.collect()
+}
+
+impl RetroGameManagerApp {
+	// 重命名文件为游戏名称
+	fn rename_file_to_game_name(&self, file_path: &Path, game: &GameEntry) -> Result<()> {
+		// 获取文件的父目录
+		let parent_dir = file_path.parent()
+			.ok_or_else(|| anyhow!("无法获取文件父目录"))?;
+		
+		// 获取文件扩展名
+		let extension = file_path.extension()
+			.map(|ext| format!(".{}", ext.to_string_lossy()))
+			.unwrap_or_default();
+		
+		// 创建新的文件名（游戏名称 + 扩展名）
+		let new_filename = format!("{}{}", sanitize_filename(&game.name), extension);
+		let new_path = parent_dir.join(&new_filename);
+		
+		// 重命名文件
+		fs::rename(file_path, &new_path)
+			.context(format!("无法将文件 '{}' 重命名为 '{}'", file_path.display(), new_path.display()))?;
+		
+		Ok(())
+	}
+}
+
+// 清理文件名，移除非法字符
+fn sanitize_filename(name: &str) -> String {
+	name.chars()
+		.map(|c| match c {
+			'<' | '>' | ':' | '\"' | '/' | '\\' | '|' | '?' | '*' => '_',
+			_ => c,
+		})
 		.collect()
 }
 
