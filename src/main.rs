@@ -1,13 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use eframe::{egui, App};
+use eframe::{egui, App, Error};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
 mod xml;
+mod image_loader;
 use crate::xml::{parse_games_from_file, GameEntry};
+use crate::image_loader::{ImageLoader, ImageLoadResult};
 use egui::Color32;
 
 // 关键词高亮辅助
@@ -193,6 +196,9 @@ struct RecentFilters {
 	platforms: Vec<String>,
 	regions: Vec<String>,
 	languages: Vec<String>,
+	selected_platforms: Vec<String>,  // 添加记住选择的平台
+	selected_region: Option<String>,   // 添加记住选择的区域
+	selected_language: Option<String>, // 添加记住选择的语言
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +230,9 @@ impl RecentFilters {
 
 struct RetroGameSearchApp {
 	query: String,
-	platform_filter: String,
+	platform_filters: Vec<String>,  // 支持多选
+	platform_search: String,        // 平台搜索文本
+	show_platform_selector: bool,   // 控制平台选择器显示
 	region_filter: String,
 	language_filter: String,
 	status: String,
@@ -241,6 +249,8 @@ struct RetroGameSearchApp {
     show_detail: bool,
     detail_xml_cache: Option<String>,
     detail_tab: DetailTab,
+    // 图片加载器
+    image_loader: Arc<ImageLoader>,
 }
 
 impl RetroGameSearchApp {
@@ -251,11 +261,14 @@ impl RetroGameSearchApp {
 		let (index, platforms, regions, languages, status) = load_index(&xmldb_dir)?;
 		let persisted = RecentFilters::load();
 		install_chinese_fonts(&cc.egui_ctx);
+		let image_loader = Arc::new(ImageLoader::new());
 		Ok(Self {
 			query: String::new(),
-			platform_filter: String::new(),
-			region_filter: String::new(),
-			language_filter: String::new(),
+			platform_filters: persisted.selected_platforms.clone(),  // 从保存的数据中恢复
+			platform_search: String::new(),  // 初始化平台搜索文本
+			show_platform_selector: false,   // 初始化平台选择器显示状态
+			region_filter: persisted.selected_region.clone().unwrap_or_default(),  // 从保存的数据中恢复区域选择
+			language_filter: persisted.selected_language.clone().unwrap_or_default(),  // 从保存的数据中恢复语言选择
 			status,
 			platforms,
 			available_regions: regions,
@@ -269,6 +282,7 @@ impl RetroGameSearchApp {
             show_detail: false,
             detail_xml_cache: None,
             detail_tab: DetailTab::Info,
+            image_loader,
 		})
 	}
 
@@ -276,6 +290,17 @@ impl RetroGameSearchApp {
 		self.recent_store.platforms = self.recent_platforms.clone();
 		self.recent_store.regions = self.recent_regions.clone();
 		self.recent_store.languages = self.recent_languages.clone();
+		self.recent_store.selected_platforms = self.platform_filters.clone();  // 保存当前选择的平台
+		self.recent_store.selected_region = if self.region_filter.is_empty() { 
+			None 
+		} else { 
+			Some(self.region_filter.clone()) 
+		};  // 保存当前选择的区域
+		self.recent_store.selected_language = if self.language_filter.is_empty() { 
+			None 
+		} else { 
+			Some(self.language_filter.clone()) 
+		};  // 保存当前选择的语言
 		self.recent_store.save();
 	}
 }
@@ -288,40 +313,113 @@ impl App for RetroGameSearchApp {
 				let _changed = ui.text_edit_singleline(&mut self.query).changed();
 				ui.separator();
 
-				// 平台：标签在左 + 下拉
+				// 平台：标签在左 + 多选
 				ui.horizontal(|ui| {
 					ui.label("平台");
-					egui::ComboBox::from_id_source("platform_combo")
-						.selected_text(if self.platform_filter.is_empty() { "全部".to_string() } else { self.platform_filter.clone() })
-						.show_ui(ui, |ui| {
-						let mut chosen: Option<String> = None;
-						if !self.recent_platforms.is_empty() {
-							ui.label("最近");
-							for rp in self.recent_platforms.clone() {
-								let selected = !self.platform_filter.is_empty() && self.platform_filter == rp;
-								if ui.selectable_label(selected, &rp).clicked() {
-									self.platform_filter = rp.clone();
-									chosen = Some(rp.clone());
+					// 显示已选择的平台数量
+					let selected_count = self.platform_filters.len();
+					let display_text = if selected_count == 0 {
+						"未选择".to_string()
+					} else if selected_count == self.platforms.len() {
+						"全部".to_string()
+					} else {
+						format!("已选择 {} 项", selected_count)
+					};
+					
+					// 使用按钮触发平台选择窗口
+					let button_response = ui.button(display_text);
+					
+					if button_response.clicked() {
+						self.show_platform_selector = true;
+					}
+					
+					// 显示平台选择窗口
+					if self.show_platform_selector {
+						let mut open = true;
+						egui::Window::new("选择平台")
+							.open(&mut open)
+							.resizable(true)
+							.default_size(egui::vec2(350.0, 400.0))
+							.default_pos(button_response.rect.left_bottom())  // 设置窗口位置在按钮下方
+							.show(ui.ctx(), |ui| {
+								// 添加平台搜索框
+								ui.horizontal(|ui| {
+									ui.label("搜索:");
+									ui.text_edit_singleline(&mut self.platform_search);
+								});
+								
+								// 添加"全选"选项
+								let all_selected = self.platform_filters.len() == self.platforms.len();
+								let mut new_all_selected = all_selected;
+								if ui.checkbox(&mut new_all_selected, "全选").clicked() {
+									if new_all_selected {
+										self.platform_filters = self.platforms.clone();
+									} else {
+										self.platform_filters.clear();
+									}
+									self.persist_recents();
 								}
-							}
-							ui.separator();
+								ui.separator();
+								
+								// 使用ScrollArea来容纳平台列表，避免窗口太高
+								egui::ScrollArea::vertical()
+									.max_height(300.0)
+									.show(ui, |ui| {
+										// 为每个平台添加checkbox，但限制显示数量
+										let mut displayed_count = 0;
+										let max_display = 50; // 限制最多显示50个平台
+										let mut updates = Vec::new();
+										
+										for platform in &self.platforms {
+											// 如果有搜索过滤器，只显示匹配的平台
+											if !self.platform_search.is_empty() && !platform.to_lowercase().contains(&self.platform_search.to_lowercase()) {
+												continue;
+											}
+											
+											// 限制显示数量以避免卡顿
+											if displayed_count >= max_display {
+												ui.label(format!("... 还有 {} 个平台未显示", self.platforms.len() - displayed_count));
+												break;
+											}
+											
+											let mut selected = self.platform_filters.contains(platform);
+											if ui.checkbox(&mut selected, platform).clicked() {
+												updates.push((platform.clone(), selected));
+											}
+											displayed_count += 1;
+										}
+										
+										// 应用更新
+										let mut needs_persist = false;
+										for (platform, selected) in updates {
+											if selected {
+												if !self.platform_filters.contains(&platform) {
+													self.platform_filters.push(platform.clone());
+													add_recent(&mut self.recent_platforms, &platform);
+													needs_persist = true;
+												}
+											} else {
+												self.platform_filters.retain(|p| p != &platform);
+											}
+										}
+										
+										// 如果有更改，保存到最近使用列表
+										if needs_persist {
+											self.persist_recents();
+										}
+										
+										// 如果搜索过滤后没有显示任何平台，显示提示信息
+										if displayed_count == 0 && !self.platform_search.is_empty() {
+											ui.label("未找到匹配的平台");
+										}
+									});
+							});
+						
+						// 如果窗口被关闭，更新状态
+						if !open {
+							self.show_platform_selector = false;
 						}
-						if ui.selectable_label(self.platform_filter.is_empty(), "全部").clicked() {
-							self.platform_filter.clear();
-						}
-						ui.separator();
-						for p in self.platforms.clone() {
-							let selected = !self.platform_filter.is_empty() && self.platform_filter == p;
-							if ui.selectable_label(selected, &p).clicked() {
-								self.platform_filter = p.clone();
-								chosen = Some(p.clone());
-							}
-						}
-						if let Some(p) = chosen {
-							add_recent(&mut self.recent_platforms, &p);
-							self.persist_recents();
-						}
-					});
+					}
 				});
 			});
 
@@ -407,7 +505,7 @@ impl App for RetroGameSearchApp {
 				ui.separator();
 				if ui.button("全部清空").clicked() {
 					self.query.clear();
-					self.platform_filter.clear();
+					self.platform_filters.clear();
 					self.region_filter.clear();
 					self.language_filter.clear();
 				}
@@ -415,12 +513,12 @@ impl App for RetroGameSearchApp {
 		});
 
 		let results = filter_results(
-			&self.index,
-			&self.query,
-			&self.platform_filter,
-			&self.region_filter,
-			&self.language_filter,
-		);
+		&self.index,
+		&self.query,
+		&self.platform_filters,  // 传递平台过滤器数组
+		&self.region_filter,
+		&self.language_filter,
+	);
 
 		egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
 			ui.label(format!(
@@ -451,6 +549,60 @@ impl App for RetroGameSearchApp {
                             ui.separator();
                             match self.detail_tab {
                                 DetailTab::Info => {
+                                    // 使用异步图片加载器加载三张图片
+                                    let (boxart_result, title_result, snap_result) = self.image_loader.load_game_images_async(
+                                        ctx,
+                                        g.platform.clone(),
+                                        g.name.clone(),
+                                    );
+                                    
+                                    // 只有当至少有一张图片存在时才显示
+                                    let has_images = matches!(boxart_result, ImageLoadResult::Loaded(_)) || 
+                                                    matches!(title_result, ImageLoadResult::Loaded(_)) || 
+                                                    matches!(snap_result, ImageLoadResult::Loaded(_));
+                                    
+                                    if has_images {
+                                        ui.horizontal(|ui| {
+                                            // 计算每张图片的大小，使三张图片平均分布
+                                            let available_width = ui.available_width();
+                                            let max_size = egui::Vec2::new((available_width / 3.0) - 10.0, 200.0);
+                                            
+                                            // 显示Boxart图片
+                                            if let ImageLoadResult::Loaded(texture_handle) = &boxart_result {
+                                                ui.image((texture_handle.id(), max_size));
+                                            } else if matches!(boxart_result, ImageLoadResult::Loading) {
+                                                ui.allocate_ui(max_size, |ui| {
+                                                    ui.centered_and_justified(|ui| {
+                                                        ui.label("加载中...");
+                                                    });
+                                                });
+                                            }
+                                            
+                                            // 显示Title图片
+                                            if let ImageLoadResult::Loaded(texture_handle) = &title_result {
+                                                ui.image((texture_handle.id(), max_size));
+                                            } else if matches!(title_result, ImageLoadResult::Loading) {
+                                                ui.allocate_ui(max_size, |ui| {
+                                                    ui.centered_and_justified(|ui| {
+                                                        ui.label("加载中...");
+                                                    });
+                                                });
+                                            }
+                                            
+                                            // 显示Snap图片
+                                            if let ImageLoadResult::Loaded(texture_handle) = &snap_result {
+                                                ui.image((texture_handle.id(), max_size));
+                                            } else if matches!(snap_result, ImageLoadResult::Loading) {
+                                                ui.allocate_ui(max_size, |ui| {
+                                                    ui.centered_and_justified(|ui| {
+                                                        ui.label("加载中...");
+                                                    });
+                                                });
+                                            }
+                                        });
+                                        ui.separator();
+                                    }
+                                    
                                     ui.label(format!("平台: {}", g.platform));
                                     ui.label(format!("区域: {}", g.region.as_deref().unwrap_or("未知")));
                                     ui.label(format!("语言: {}", g.languages.as_deref().unwrap_or("未知")));
@@ -613,14 +765,16 @@ fn load_index(xmldb_dir: &Path) -> Result<(Vec<GameEntry>, Vec<String>, Vec<Stri
 fn filter_results<'a>(
 	index: &'a [GameEntry],
 	query: &str,
-	platform: &str,
+	platforms: &[String],  // 支持多选
 	region: &str,
 	language: &str,
 ) -> Vec<&'a GameEntry> {
 	let q = query.trim().to_lowercase();
-	let p = platform.trim().to_lowercase();
 	let r = region.trim().to_lowercase();
 	let l = language.trim().to_lowercase();
+	
+	// 创建平台过滤器的HashSet以提高查找效率
+	let platform_set: std::collections::HashSet<&String> = platforms.iter().collect();
 
 	index
 		.iter()
@@ -633,9 +787,9 @@ fn filter_results<'a>(
 						.map(|n| n.to_lowercase().contains(&q))
 						.unwrap_or(false);
 			}
-			// 平台：严格匹配（不区分大小写）
-			if !p.is_empty() {
-				ok &= g.platform.to_lowercase() == p;
+			// 平台：支持多选（使用HashSet提高效率）
+			if !platforms.is_empty() {
+				ok &= platform_set.contains(&g.platform);
 			}
 			// 区域：仍然模糊匹配
 			if !r.is_empty() {
@@ -655,6 +809,7 @@ fn filter_results<'a>(
 			}
 			ok
 		})
+		.take(1000) // 限制结果数量以避免卡顿
 		.collect()
 }
 
@@ -736,16 +891,17 @@ fn install_chinese_fonts(ctx: &egui::Context) {
 	ctx.set_style(style);
 }
 
-fn main() -> Result<()> {
-	let native_options = eframe::NativeOptions::default();
-	eframe::run_native(
-		"retro-game-manager",
-		native_options,
-		Box::new(|cc| {
-			Box::new(RetroGameSearchApp::new(cc).unwrap())
-		}),
-	)
-	.map_err(|e| anyhow!(e.to_string()))?;
+fn main() -> Result<(), Error> {
+	let native_options = eframe::NativeOptions {
+		viewport: egui::ViewportBuilder::default()
+			.with_inner_size([800.0, 600.0])  // 修改默认窗口大小
+			.with_min_inner_size([600.0, 400.0]),
+		..Default::default()
+	};
 
-	Ok(())
+	eframe::run_native(
+		"retro-game-manager",  // 修改窗口标题为英文
+		native_options,
+		Box::new(|cc| Box::new(RetroGameSearchApp::new(cc).unwrap())),
+	)
 }
