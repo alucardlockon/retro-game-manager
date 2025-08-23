@@ -10,7 +10,6 @@ use walkdir::WalkDir;
 
 mod image_loader;
 mod xml;
-// mod baidu_fallback; // 暂时注释掉，因为文件内容被注释掉了
 use crate::image_loader::{ImageLoadResult, ImageLoader};
 use crate::xml::{parse_games_from_file, GameEntry};
 use egui::Color32;
