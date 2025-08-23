@@ -46,8 +46,7 @@ retro-game-manager/
   ├─ src/
   │   ├─ main.rs        # UI、搜索/筛选、详情窗口
   │   ├─ xml.rs         # XML 解析与 <game> 源片段提取
-  │   ├─ image_loader.rs # 图片加载逻辑
-  │   └─ baidu_fallback.rs # （预留）百度搜索功能
+  │   └─ image_loader.rs # 图片加载逻辑
   ├─ xmldb/             # 放置 XML 数据（已包含示例）
   ├─ Cargo.toml
   └─ README.md
