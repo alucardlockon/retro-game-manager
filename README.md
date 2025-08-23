@@ -29,6 +29,10 @@ cargo run --release
   - 源定位：记录对应 XML 文件路径与第几个 `<game>` 节点索引，方便提取原始 XML
 - 支持自闭合标签（`<archive .../>`, `<details .../>`）
 
+## 图片加载
+- 应用会根据游戏平台和名称，尝试从 [libretro-thumbnails](https://github.com/libretro-thumbnails) 加载游戏图片。
+- 平台映射是动态生成的，应用启动时会扫描 `xmldb/` 文件夹中的 XML 文件名来构建平台映射表。
+
 ## 开发脚本
 - fmt + clippy（建议）
 ```bash
@@ -41,7 +45,9 @@ cargo clippy --all-targets --all-features -D warnings
 retro-game-manager/
   ├─ src/
   │   ├─ main.rs        # UI、搜索/筛选、详情窗口
-  │   └─ xml.rs         # XML 解析与 <game> 源片段提取
+  │   ├─ xml.rs         # XML 解析与 <game> 源片段提取
+  │   ├─ image_loader.rs # 图片加载逻辑
+  │   └─ baidu_fallback.rs # （预留）百度搜索功能
   ├─ xmldb/             # 放置 XML 数据（已包含示例）
   ├─ Cargo.toml
   └─ README.md

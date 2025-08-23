@@ -1,7 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use eframe::egui;
 use reqwest::blocking::Client;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::path::Path; // 添加 Path 导入
+use walkdir::WalkDir; // 添加 walkdir 导入
+use std::ffi::OsStr; // 添加 OsStr 导入
 
 // 图片加载结果
 #[derive(Clone)]
@@ -15,6 +18,8 @@ pub enum ImageLoadResult {
 pub struct ImageLoader {
     cache: Arc<Mutex<HashMap<String, ImageLoadResult>>>,
     client: Client,
+    // 动态平台映射表
+    platform_map: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ImageLoader {
@@ -22,85 +27,74 @@ impl ImageLoader {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
             client: Client::new(),
+            platform_map: Arc::new(Mutex::new(HashMap::new())), // 初始化 platform_map
         }
     }
 
-    // 获取图片URL
-    fn get_image_url(platform: &str, game_name: &str, image_type: &str) -> Option<String> {
-        // 平台映射表：将平台名称映射到libretro-thumbnails的子模块名称
-        let platform_map: HashMap<&str, &str> = [
-            ("Nintendo - Game Boy", "Nintendo_-_Game_Boy"),
-            ("Nintendo - Game Boy Advance", "Nintendo_-_Game_Boy_Advance"),
-            ("Nintendo - Game Boy Color", "Nintendo_-_Game_Boy_Color"),
-            ("Nintendo - Nintendo Entertainment System", "Nintendo_-_Nintendo_Entertainment_System"),
-            ("Nintendo - Super Nintendo Entertainment System", "Nintendo_-_Super_Nintendo_Entertainment_System"),
-            ("Nintendo - Nintendo 64", "Nintendo_-_Nintendo_64"),
-            ("Nintendo - GameCube", "Nintendo_-_GameCube"),
-            ("Nintendo - Wii", "Nintendo_-_Wii"),
-            ("Nintendo - Wii U", "Nintendo_-_Wii_U"),
-            ("Nintendo - Nintendo DS", "Nintendo_-_Nintendo_DS"),
-            ("Nintendo - Nintendo 3DS", "Nintendo_-_Nintendo_3DS"),
-            ("Sega - Mega Drive - Genesis", "Sega_-_Mega_Drive_-_Genesis"),
-            ("Sega - Master System - Mark III", "Sega_-_Master_System_-_Mark_III"),
-            ("Sega - Game Gear", "Sega_-_Game_Gear"),
-            ("Sega - Saturn", "Sega_-_Saturn"),
-            ("Sega - Dreamcast", "Sega_-_Dreamcast"),
-            ("Sony - PlayStation", "Sony_-_PlayStation"),
-            ("Sony - PlayStation 2", "Sony_-_PlayStation_2"),
-            ("Sony - PlayStation 3", "Sony_-_PlayStation_3"),
-            ("Sony - PlayStation Portable", "Sony_-_PlayStation_Portable"),
-            ("Sony - PlayStation Vita", "Sony_-_PlayStation_Vita"),
-            ("Atari - 2600", "Atari_-_2600"),
-            ("Atari - 5200", "Atari_-_5200"),
-            ("Atari - 7800", "Atari_-_7800"),
-            ("Atari - Jaguar", "Atari_-_Jaguar"),
-            ("Atari - Lynx", "Atari_-_Lynx"),
-            ("NEC - TurboGrafx 16", "NEC_-_TurboGrafx_16"),
-            ("NEC - PC Engine", "NEC_-_PC_Engine"),
-            ("NEC - PC Engine CD", "NEC_-_PC_Engine_CD"),
-            ("NEC - SuperGrafx", "NEC_-_SuperGrafx"),
-            ("Bandai - WonderSwan", "Bandai_-_WonderSwan"),
-            ("Bandai - WonderSwan Color", "Bandai_-_WonderSwan_Color"),
-            ("SNK - Neo Geo Pocket", "SNK_-_Neo_Geo_Pocket"),
-            ("SNK - Neo Geo Pocket Color", "SNK_-_Neo_Geo_Pocket_Color"),
-            ("Microsoft - Xbox", "Microsoft_-_Xbox"),
-            ("Microsoft - Xbox 360", "Microsoft_-_Xbox_360"),
-            ("Commodore - Amiga", "Commodore_-_Amiga"),
-            ("Commodore - 64", "Commodore_-_64"),
-            ("Apple - II", "Apple_-_II"),
-            ("Apple - IIGS", "Apple_-_IIGS"),
-            ("3DO - Interactive Multiplayer", "3DO_-_Interactive_Multiplayer"),
-            ("Amstrad - CPC", "Amstrad_-_CPC"),
-            ("Coleco - ColecoVision", "Coleco_-_ColecoVision"),
-            ("GCE - Vectrex", "GCE_-_Vectrex"),
-            ("Magnavox - Odyssey2", "Magnavox_-_Odyssey2"),
-            ("Mattel - Intellivision", "Mattel_-_Intellivision"),
-            ("Microsoft - MSX", "Microsoft_-_MSX"),
-            ("Microsoft - MSX2", "Microsoft_-_MSX2"),
-            ("NEC - PC-88", "NEC_-_PC-88"),
-            ("NEC - PC-98", "NEC_-_PC-98"),
-            ("NEC - PC-FX", "NEC_-_PC-FX"),
-            ("Nintendo - Family Computer Disk System", "Nintendo_-_Family_Computer_Disk_System"),
-            ("Nintendo - Satellaview", "Nintendo_-_Satellaview"),
-            ("Nintendo - Sufami Turbo", "Nintendo_-_Sufami_Turbo"),
-            ("Nintendo - Virtual Boy", "Nintendo_-_Virtual_Boy"),
-            ("Philips - CD-i", "Philips_-_CD-i"),
-            ("SNK - Neo Geo CD", "SNK_-_Neo_Geo_CD"),
-            ("SNK - Neo Geo", "SNK_-_Neo_Geo"),
-            ("Watara - Supervision", "Watara_-_Supervision"),
-        ].iter().cloned().collect();
+    // 新增：初始化 platform_map 的方法
+    pub fn initialize_platform_map(&self, xmldb_path: &Path) {
+        let mut map = self.platform_map.lock().unwrap();
+        map.clear(); // 清空现有映射
 
+        // 扫描 xmldb 目录
+        for entry in WalkDir::new(xmldb_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension() == Some(OsStr::new("xml")))
+        {
+            let path = entry.path();
+            if let Some(file_stem) = path.file_stem() {
+                let platform_name_raw = file_stem.to_string_lossy();
+                // 从文件名推断平台名称 (与 xml.rs 中的逻辑一致)
+                let platform_name = platform_name_raw
+                    .split(" (")
+                    .next()
+                    .unwrap_or(&platform_name_raw)
+                    .to_string();
+                
+                // 尝试将平台名称转换为 libretro-thumbnails 的格式
+                // 这里是一个简化的转换规则，你可能需要根据实际情况调整
+                let thumb_platform_name = platform_name
+                    .replace(" - ", "_-_")
+                    .replace(" ", "_")
+                    .replace("/", "_")
+                    .replace(":", "_");
+
+                // 插入映射 (如果尚未存在，避免覆盖)
+                map.entry(platform_name).or_insert(thumb_platform_name);
+            }
+        }
+        
+        // 你可以在这里添加一些已知的、需要特殊处理的映射
+        // 例如，如果文件名推断不准确，可以手动覆盖
+        // map.insert("Some Special Platform".to_string(), "Some_Special_Platform".to_string());
+        
+        println!("Initialized platform map with {} entries.", map.len());
+    }
+
+
+    // 获取图片URL
+    fn get_image_url(&self, platform: &str, game_name: &str, image_type: &str) -> Option<String> {
+        // 锁定并获取映射表的引用
+        let map = self.platform_map.lock().unwrap();
+        
         // 如果找到了对应的平台映射
-        if let Some(thumb_platform) = platform_map.get(platform) {
+        if let Some(thumb_platform) = map.get(platform) {
             // 构造图片URL
             let url = format!(
                 "https://raw.githubusercontent.com/libretro-thumbnails/{}/master/{}/{}.png",
                 thumb_platform,
                 image_type,
-                game_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+                game_name
+                    .replace("/", "_")
+                    .replace("\\", "_")
+                    .replace(":", "_")
             );
             Some(url)
         } else {
+            // 如果没有找到映射，可以选择返回 None 或者尝试一个默认的猜测
+            // 这里我们选择返回 None
             None
         }
     }
@@ -114,7 +108,7 @@ impl ImageLoader {
         image_type: String,
     ) -> ImageLoadResult {
         let cache_key = format!("{}_{}_{}", platform, game_name, image_type);
-        
+
         // 检查缓存
         {
             let cache = self.cache.lock().unwrap();
@@ -122,15 +116,15 @@ impl ImageLoader {
                 return result.clone();
             }
         }
-        
+
         // 标记为加载中
         {
             let mut cache = self.cache.lock().unwrap();
             cache.insert(cache_key.clone(), ImageLoadResult::Loading);
         }
-        
-        // 获取图片URL
-        let url = match Self::get_image_url(&platform, &game_name, &image_type) {
+
+        // 获取图片URL (使用实例方法)
+        let url = match self.get_image_url(&platform, &game_name, &image_type) {
             Some(url) => url,
             None => {
                 let mut cache = self.cache.lock().unwrap();
@@ -138,12 +132,12 @@ impl ImageLoader {
                 return ImageLoadResult::NotFound;
             }
         };
-        
+
         // 克隆必要的数据
         let cache = Arc::clone(&self.cache);
         let ctx = ctx.clone();
         let client = self.client.clone();
-        
+
         // 在后台线程中加载图片
         std::thread::spawn(move || {
             match client.get(&url).send() {
@@ -154,20 +148,20 @@ impl ImageLoader {
                             if let Ok(img) = image::load_from_memory(&bytes) {
                                 let rgba_image = img.to_rgba8();
                                 let (width, height) = rgba_image.dimensions();
-                                
+
                                 // 创建egui纹理
                                 let pixels: Vec<u8> = rgba_image.into_raw();
                                 let image_buffer = egui::ColorImage::from_rgba_unmultiplied(
                                     [width as usize, height as usize],
                                     &pixels,
                                 );
-                                
+
                                 let texture_handle = ctx.load_texture(
                                     format!("thumbnail_{}", cache_key),
                                     image_buffer,
                                     egui::TextureOptions::NEAREST,
                                 );
-                                
+
                                 // 缓存纹理
                                 let mut cache = cache.lock().unwrap();
                                 cache.insert(cache_key, ImageLoadResult::Loaded(texture_handle));
@@ -193,14 +187,14 @@ impl ImageLoader {
                     cache.insert(cache_key, ImageLoadResult::NotFound);
                 }
             }
-            
+
             // 请求重绘以更新UI
             ctx.request_repaint();
         });
-        
+
         ImageLoadResult::Loading
     }
-    
+
     // 批量加载三张图片
     pub fn load_game_images_async(
         &self,
@@ -208,8 +202,18 @@ impl ImageLoader {
         platform: String,
         game_name: String,
     ) -> (ImageLoadResult, ImageLoadResult, ImageLoadResult) {
-        let boxart = self.load_image_async(ctx, platform.clone(), game_name.clone(), "Named_Boxarts".to_string());
-        let title = self.load_image_async(ctx, platform.clone(), game_name.clone(), "Named_Titles".to_string());
+        let boxart = self.load_image_async(
+            ctx,
+            platform.clone(),
+            game_name.clone(),
+            "Named_Boxarts".to_string(),
+        );
+        let title = self.load_image_async(
+            ctx,
+            platform.clone(),
+            game_name.clone(),
+            "Named_Titles".to_string(),
+        );
         let snap = self.load_image_async(ctx, platform, game_name, "Named_Snaps".to_string());
         (boxart, title, snap)
     }
